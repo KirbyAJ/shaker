@@ -2,6 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+
+    <!-- Request foreground service permission -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" /> <!-- If applicable, or use a more specific one like MEDIA_PLAYBACK, etc. For sensors, a generic one might be needed or combined if not specific -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -22,6 +27,22 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service
+            android:name=".ShakeDetectorService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <!-- For API 34+, you MUST declare a foregroundServiceType.
+                 'specialUse' is a placeholder. You should choose the most appropriate type
+                 from the list: https://developer.android.com/guide/components/foreground-services#types
+                 If none fit perfectly, 'specialUse' requires justification in Play Console.
+                 For sensor-based tasks not fitting other categories, 'specialUse' might be
+                 the path, but it will undergo more scrutiny.
+                 If your primary goal is playing audio in response, `mediaPlayback` could be considered,
+                 but shake detection itself isn't media playback.
+                 This is an area of evolving policy, so always check the latest Android docs.
+            -->
+        </service>
     </application>
 
 </manifest>
