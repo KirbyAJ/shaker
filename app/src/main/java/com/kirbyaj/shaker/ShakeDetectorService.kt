@@ -15,9 +15,16 @@ import android.media.MediaPlayer
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.service.autofill.Field
 import android.util.Log
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.geometry.isEmpty
+import androidx.compose.ui.input.key.type
 import androidx.core.app.NotificationCompat
+import kotlin.io.path.name
 import kotlin.math.sqrt
+import kotlin.random.Random
+import kotlin.random.nextInt
 
 class ShakeDetectorService : Service(), SensorEventListener {
 
@@ -29,9 +36,19 @@ class ShakeDetectorService : Service(), SensorEventListener {
     private var acceleration = 0f
     private var currentAcceleration = SensorManager.GRAVITY_EARTH
     private var lastAcceleration = SensorManager.GRAVITY_EARTH
-    private val shakeThreshold = 5f
+    private val shakeThreshold = 4f
 
     private var wakeLock: PowerManager.WakeLock? = null // Declare WakeLock variable
+    private val shakeSoundResourceIds = listOf(
+        R.raw.moaning_1,
+        R.raw.moaning_2,
+        R.raw.moaning_3,
+        R.raw.moaning_4,
+        R.raw.moaning_5
+    )
+
+    private var currentShakeSoundResId: Int = 0
+    private var currentButtonSoundResId: Int = 0
 
     companion object {
         const val NOTIFICATION_CHANNEL_ID = "ShakeDetectorChannel"
@@ -42,73 +59,122 @@ class ShakeDetectorService : Service(), SensorEventListener {
         private const val WAKE_LOCK_TAG = "ShakeDetectorService::WakeLock"
     }
 
+    @Volatile
+    var isServiceRunning: Boolean = false
+        private set
+
+
     override fun onCreate() {
         super.onCreate()
         Log.d("ShakeDetectorService", "onCreate")
+
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
-        // Initialize PowerManager and WakeLock
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        // Create a partial wake lock that keeps the CPU running
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG)
-        wakeLock?.setReferenceCounted(false) // Optional: manage release explicitly
+        wakeLock?.setReferenceCounted(false)
 
-        // Initialize MediaPlayers (as before)
-        shakeMediaPlayer = try {
-            MediaPlayer.create(this, R.raw.moan) // Replace
-        } catch (e: Exception) {
-            Log.e("ShakeDetectorService", "Error creating shake MediaPlayer", e)
-            null
-        }
-        shakeMediaPlayer?.setOnErrorListener { _, what, extra ->
-            Log.e("ShakeDetectorService", "Shake MediaPlayer error: what=$what, extra=$extra")
-            true
-        }
-        // ... (shakeMediaPlayer onCompletionListener)
-
-        buttonMediaPlayer = try {
-            MediaPlayer.create(this, R.raw.moan) // Replace
-        } catch (e: Exception) {
-            Log.e("ShakeDetectorService", "Error creating button MediaPlayer", e)
-            null
-        }
-        buttonMediaPlayer?.setOnErrorListener { _, what, extra ->
-            Log.e("ShakeDetectorService", "Button MediaPlayer error: what=$what, extra=$extra")
-            true
-        }
-        // ... (buttonMediaPlayer onCompletionListener)
+        // Initialize MediaPlayers - they will pick their first random sound here
+        initializeShakeMediaPlayer()
+        initializeButtonMediaPlayer()
 
         createNotificationChannel()
     }
 
+    private fun getRandomShakeSoundResId(): Int {
+        if (shakeSoundResourceIds.isEmpty()) {
+            Log.e("ShakeDetectorService", "Shake sound resource ID list is empty! Using fallback.")
+            return R.raw.moaning_1 // Fallback if list is somehow empty (should not happen with hardcoded list)
+        }
+        return shakeSoundResourceIds.random() // Kotlin's convenient way to get a random element
+    }
+
+    private fun getRandomButtonSoundResId(): Int {
+        return getRandomShakeSoundResId()
+    }
+
+    private fun initializeShakeMediaPlayer() {
+        shakeMediaPlayer?.release()
+        currentShakeSoundResId = getRandomShakeSoundResId()
+
+        Log.d("ShakeDetectorService", "Initializing shake MediaPlayer with sound ID: $currentShakeSoundResId")
+        try {
+            shakeMediaPlayer = MediaPlayer.create(this, currentShakeSoundResId)
+            shakeMediaPlayer?.setOnErrorListener { mp, what, extra ->
+                Log.e("ShakeDetectorService", "Shake MediaPlayer error (ID: $currentShakeSoundResId): what=$what, extra=$extra")
+                // Attempt to re-initialize with another sound from the list
+                initializeShakeMediaPlayer()
+                true
+            }
+            shakeMediaPlayer?.setOnCompletionListener {
+                Log.d("ShakeDetectorService", "Shake MediaPlayer (ID: $currentShakeSoundResId) playback completed.")
+                // To make it play a NEW random sound on the NEXT shake after completion:
+                initializeShakeMediaPlayer()
+            }
+        } catch (e: Exception) {
+            Log.e("ShakeDetectorService", "Error creating shake MediaPlayer with ID $currentShakeSoundResId", e)
+            shakeMediaPlayer = null
+        }
+    }
+
+    private fun initializeButtonMediaPlayer() {
+        buttonMediaPlayer?.release()
+        currentButtonSoundResId = getRandomButtonSoundResId()
+
+        Log.d("ShakeDetectorService", "Initializing button MediaPlayer with sound ID: $currentButtonSoundResId")
+        try {
+            buttonMediaPlayer = MediaPlayer.create(this, currentButtonSoundResId)
+            buttonMediaPlayer?.setOnErrorListener { mp, what, extra ->
+                Log.e("ShakeDetectorService", "Button MediaPlayer error (ID: $currentButtonSoundResId): what=$what, extra=$extra")
+                initializeButtonMediaPlayer()
+                true
+            }
+            buttonMediaPlayer?.setOnCompletionListener {
+                Log.d("ShakeDetectorService", "Button MediaPlayer (ID: $currentButtonSoundResId) playback completed.")
+                // If you want the button sound to be different next time automatically after completion
+                // initializeButtonMediaPlayer()
+            }
+        } catch (e: Exception) {
+            Log.e("ShakeDetectorService", "Error creating button MediaPlayer with ID $currentButtonSoundResId", e)
+            buttonMediaPlayer = null
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d("ShakeDetectorService", "onStartCommand, Action: ${intent?.action}")
-
         when (intent?.action) {
             ACTION_START_SERVICE -> {
-                startForegroundServiceNotification()
-                if (accelerometer != null) {
-                    sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_UI)
-                    Log.d("ShakeDetectorService", "Accelerometer listener registered")
-                    // Acquire the wake lock when the service starts listening
-                    if (wakeLock?.isHeld == false) {
-                        wakeLock?.acquire(20*60*1000) // You can specify a timeout here if needed
-                        Log.d("ShakeDetectorService", "WakeLock acquired")
+                if (!isServiceRunning) {
+                    // Sounds are initialized in onCreate. If you want a new random shake sound
+                    // picked every time the service is explicitly started (not just created),
+                    // you can call initializeShakeMediaPlayer() here.
+                    // initializeShakeMediaPlayer() // This would make it pick a new one now.
+
+                    startForegroundServiceNotification()
+                    if (accelerometer != null) {
+                        sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_UI)
+                        if (wakeLock?.isHeld == false) wakeLock?.acquire()
+                        isServiceRunning = true
+                        Log.d("ShakeDetectorService", "Service marked as running.")
+                    } else {
+                        Log.e("ShakeDetectorService", "Accelerometer not available.")
+                        stopSelf()
                     }
                 } else {
-                    Log.e("ShakeDetectorService", "Accelerometer not available, stopping service.")
-                    stopSelf()
+                    Log.d("ShakeDetectorService", "Service already running.")
+                    startForegroundServiceNotification() // Ensure it's in foreground
                 }
             }
             ACTION_STOP_SERVICE -> {
-                Log.d("ShakeDetectorService", "Stopping service via action.")
                 stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf() // onDestroy will be called, which releases the wake lock
+                stopSelf()
             }
             ACTION_PLAY_BUTTON_SOUND -> {
                 Log.d("ShakeDetectorService", "Play button sound action received")
-                playButtonSound()
+                // Pick a new random sound for the button EACH time it's pressed
+                initializeButtonMediaPlayer()
+                playButtonSoundInternal()
             }
         }
         return START_STICKY
@@ -147,12 +213,24 @@ class ShakeDetectorService : Service(), SensorEventListener {
 
             if (acceleration > shakeThreshold) {
                 Log.d("ShakeDetectorService", "Shake detected! Acceleration: $acceleration")
+
+                // The shakeMediaPlayer is already initialized (and re-initialized on completion)
+                // to have a random sound ready.
                 if (shakeMediaPlayer?.isPlaying == false) {
                     try {
                         shakeMediaPlayer?.start()
+                        // The onCompletionListener will call initializeShakeMediaPlayer()
+                        // to prepare for the *next* shake.
                     } catch (e: java.lang.IllegalStateException) {
-                        Log.e("ShakeDetectorService", "Error starting shake MediaPlayer", e)
+                        Log.e("ShakeDetectorService", "Error starting shake MediaPlayer (ID: $currentShakeSoundResId)", e)
+                        // Attempt to recover if it was in a bad state
+                        initializeShakeMediaPlayer()
+                        shakeMediaPlayer?.start()
                     }
+                } else if (shakeMediaPlayer == null) {
+                    Log.w("ShakeDetectorService", "shakeMediaPlayer was null on shake, re-initializing.")
+                    initializeShakeMediaPlayer()
+                    shakeMediaPlayer?.start()
                 }
             }
         }
@@ -179,6 +257,29 @@ class ShakeDetectorService : Service(), SensorEventListener {
     }
 
 
+    private fun playButtonSoundInternal() {
+        if (buttonMediaPlayer?.isPlaying == true) {
+            buttonMediaPlayer?.stop() // Stop and re-prepare if already playing
+            try {
+                buttonMediaPlayer?.prepare() // Not strictly necessary if re-creating, but good for reset
+                buttonMediaPlayer?.seekTo(0)
+            } catch (e: java.lang.Exception) {
+                Log.e("ShakeDetectorService", "Error preparing/seeking button MediaPlayer (ID: $currentButtonSoundResId)", e)
+            }
+        }
+        try {
+            buttonMediaPlayer?.start()
+        } catch (e: IllegalStateException) {
+            Log.e("ShakeDetectorService", "Error starting button MediaPlayer (ID: $currentButtonSoundResId)", e)
+            initializeButtonMediaPlayer() // Try to recover
+            buttonMediaPlayer?.start()
+        }
+
+        if (buttonMediaPlayer == null) {
+            Log.e("ShakeDetectorService", "Button MediaPlayer is null, cannot play sound.")
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         Log.d("ShakeDetectorService", "onDestroy")
@@ -189,13 +290,11 @@ class ShakeDetectorService : Service(), SensorEventListener {
         buttonMediaPlayer?.release()
         buttonMediaPlayer = null
 
-        // Release the wake lock when the service is destroyed
         if (wakeLock?.isHeld == true) {
             wakeLock?.release()
-            Log.d("ShakeDetectorService", "WakeLock released")
         }
         wakeLock = null
-
+        isServiceRunning = false
         Log.d("ShakeDetectorService", "Resources released.")
     }
 
@@ -204,15 +303,13 @@ class ShakeDetectorService : Service(), SensorEventListener {
     }
 
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val serviceChannel = NotificationChannel(
-                NOTIFICATION_CHANNEL_ID,
-                "Shake Detector Service Channel",
-                NotificationManager.IMPORTANCE_LOW // Or IMPORTANCE_DEFAULT
-            )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(serviceChannel)
-            Log.d("ShakeDetectorService", "Notification channel created.")
-        }
+        val serviceChannel = NotificationChannel(
+            NOTIFICATION_CHANNEL_ID,
+            "Shake Detector Service Channel",
+            NotificationManager.IMPORTANCE_HIGH
+        )
+        val manager = getSystemService(NotificationManager::class.java)
+        manager?.createNotificationChannel(serviceChannel)
+        Log.d("ShakeDetectorService", "Notification channel created.")
     }
 }
